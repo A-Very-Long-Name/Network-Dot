@@ -6,6 +6,8 @@
 
 **[下载最新版](https://github.com/A-Very-Long-Name/Network-Dot/releases/latest)**
 
+注意:所有代码和简介都是ChatGPT/Codex写的
+
 ## 安装
 
 **macOS 13 Ventura 或更高版本 · Apple Silicon 和 Intel 通用版**
