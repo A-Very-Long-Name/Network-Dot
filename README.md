@@ -12,7 +12,7 @@ NOTE: Code and descriptions created by ChatGPT/Codex. All ideas are otherwise or
 
 **macOS 13 Ventura or later · Apple Silicon and Intel (Universal)**
 
-1. Download `Network-Dot-1.1.0-universal.dmg` from Releases.
+1. Download `Network-Dot-1.1.1-universal.dmg` from Releases.
 2. Open the disk image and drag **Network Dot** to **Applications**.
 3. Open the app from Applications. Choose whether to launch at login in the welcome dialog.
 4. Right-click the small dot at the bottom-right for settings, language, details, or Quit.
@@ -27,13 +27,13 @@ NOTE: Code and descriptions created by ChatGPT/Codex. All ideas are otherwise or
 | Red | Network interface disconnected, or no successful probe for 2 seconds. |
 | Gray | First checks after launch, wake, or a network change. |
 
-Probes start every second, each with a 1.5-second timeout. The display checks freshness every 0.25 seconds. Interface disconnection and successful recovery update as soon as their callbacks arrive. **The 2-second threshold is measured from the last successful response, not the exact moment an outage starts.** In-flight responses and OS scheduling can affect observed delay. Short latency spikes may cause a brief red dot.
+One probe starts every second against the preferred target, **Apple by default**. If it fails or has not responded after 0.6 seconds, the other targets are tried in parallel. The first success cancels remaining probes and becomes the preferred target. While using a backup, Apple (or the first custom URL) is retried once per minute. Each request has a 1.5-second timeout; rounds do not overlap. Healthy requests are reduced from three per second to one (about 67% fewer). Slow or failing targets cause additional backup requests. The display checks freshness every 0.25 seconds. Interface disconnection and successful recovery update as soon as their callbacks arrive. **The 2-second threshold is measured from the last successful response, not the exact moment an outage starts.** In-flight responses and OS scheduling can affect observed delay. Short latency spikes may cause a brief red dot.
 
 The center is 8 points across with a one-physical-pixel black border, aligned for both standard and Retina displays. Non-activating overlay panels span Spaces and full-screen apps, and are reasserted after desktop/app transitions. Behavior during OS-controlled transition animations, screen lock, and protected system surfaces is not guaranteed. Only the small 16×16-point panel receives mouse events; everything else remains interactive.
 
 ## Checks and school networks
 
-No ICMP ping is used. A single blocked website does not turn the dot red if another target passes.
+Apple is preferred for its small, fixed 68-byte success page. Google gstatic and Cloudflare remain backups. No ICMP ping is used. A single blocked website does not turn the dot red if another target passes.
 
 | Default HTTPS target | Required response |
 | --- | --- |
@@ -43,7 +43,7 @@ No ICMP ping is used. A single blocked website does not turn the dot red if anot
 
 System TLS certificate validation must pass, and the final response hostname must match the original. Redirected sign-in portals and unexpected content do not pass the built-in checks. If **all** targets are blocked, the app cannot distinguish that from an internet outage. Green means at least one probe is reachable; it does not mean every service works.
 
-Custom HTTPS URLs: up to five, one per line. Same-host HTTP 2xx counts as success, without a content check. Use small public pages that do not require sign-in. Leave the field empty to restore defaults. For school use, test multiple permitted external websites on the actual school network.
+Custom HTTPS URLs: up to five, one per line, with your preferred target first. Same-host HTTP 2xx counts as success, without a content check. Use small public pages that do not require sign-in. Leave the field empty to restore defaults. For school use, test multiple permitted external websites on the actual school network.
 
 ## Privacy
 
@@ -63,6 +63,6 @@ Requires Xcode Command Line Tools with a current macOS SDK. No third-party depen
 ./scripts/package.sh
 ```
 
-`dist/Network Dot.app` contains both arm64 and x86_64 slices. Tests cover state transitions, failure expiration, immediate recovery, and network-change reset. Intel and older macOS builds are compile-checked; live testing was on Apple Silicon macOS 27.2. No claim of testing every multi-monitor or full-screen configuration.
+`dist/Network Dot.app` contains both arm64 and x86_64 slices. Tests cover state transitions, failure expiration, immediate recovery, network-change reset, primary-only rounds, failover, duplicate suppression, and periodic preferred-target retry. Intel and older macOS builds are compile-checked; live testing was on Apple Silicon macOS 27.2. No claim of testing every multi-monitor or full-screen configuration.
 
 For notarized distribution, use your own Developer ID Application certificate, submit the app with `xcrun notarytool`, and staple the ticket before packaging. This repository contains no signing credentials.

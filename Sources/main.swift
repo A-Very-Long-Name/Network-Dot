@@ -32,6 +32,16 @@ final class App: NSObject, NSApplicationDelegate {
     var timer: Timer?
     var health = ConnectivityHealth()
     var nextProbe: TimeInterval = 0
+    var selection = ProbeSelection()
+    var round: ProbeRound?
+    var fallbackWork: DispatchWorkItem?
+    var launchedRequestCount = 0
+    var launchCounts: [String: Int] = [:]
+    var reportDuration: Double? {
+        guard let arg = CommandLine.arguments.first(where: { $0.hasPrefix("--probe-report=") }),
+              let seconds = Double(arg.dropFirst("--probe-report=".count)), (2...120).contains(seconds) else { return nil }
+        return seconds
+    }
     var language: String { UserDefaults.standard.string(forKey: "language") ?? "auto" }
     var isChinese: Bool { language == "zh" || (language == "auto" && (Locale.preferredLanguages.first ?? "en").hasPrefix("zh")) }
     func l(_ zh: String, _ en: String) -> String { isChinese ? zh : en }
@@ -41,11 +51,17 @@ final class App: NSObject, NSApplicationDelegate {
     var state = ""
     var session: URLSession!
     var targets: [Target] {
+        if reportDuration != nil, let arg = CommandLine.arguments.first(where: { $0.hasPrefix("--probe-urls=") }) {
+            let urls = arg.dropFirst("--probe-urls=".count).split(separator: ",").map(String.init)
+            if !urls.isEmpty && urls.count <= 5 && urls.allSatisfy({ URL(string: $0)?.scheme == "https" && URL(string: $0)?.host != nil }) {
+                return urls.map { url in defaults.first(where: { $0.url == url }) ?? Target(url: url, token: "") }
+            }
+        }
         let urls = UserDefaults.standard.stringArray(forKey: "targets") ?? []
         return urls.isEmpty ? defaults : urls.map { Target(url: $0, token: "") }
     }
     func applicationDidFinishLaunching(_ notification: Notification) {
-        if NSRunningApplication.runningApplications(withBundleIdentifier: Bundle.main.bundleIdentifier ?? "local.NetworkDot").count > 1 { NSApp.terminate(nil); return }
+        if reportDuration == nil && NSRunningApplication.runningApplications(withBundleIdentifier: Bundle.main.bundleIdentifier ?? "local.NetworkDot").count > 1 { NSApp.terminate(nil); return }
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = 1.5
         config.timeoutIntervalForResource = 1.5
@@ -58,7 +74,7 @@ final class App: NSObject, NSApplicationDelegate {
         let workspaceNotifications = NSWorkspace.shared.notificationCenter
         workspaceNotifications.addObserver(self, selector: #selector(restoreOverlay), name: NSWorkspace.activeSpaceDidChangeNotification, object: nil)
         workspaceNotifications.addObserver(self, selector: #selector(restoreOverlay), name: NSWorkspace.didActivateApplicationNotification, object: nil)
-        screens()
+        if reportDuration == nil { screens() }
         monitor.pathUpdateHandler = { [weak self] path in
             DispatchQueue.main.async {
                 guard let self else { return }
@@ -71,12 +87,25 @@ final class App: NSObject, NSApplicationDelegate {
         timer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in self?.tick() }
         if let timer { RunLoop.main.add(timer, forMode: .common) }
         update()
-        if !UserDefaults.standard.bool(forKey: "welcomeShown") {
+        if let duration = reportDuration {
+            DispatchQueue.main.asyncAfter(deadline: .now() + duration) { [weak self] in
+                guard let self else { return }
+                let report: [String: Any] = ["requests": self.launchedRequestCount, "byTarget": self.launchCounts,
+                    "online": self.health.state(now: ProcessInfo.processInfo.systemUptime) == .online,
+                    "preferredIndex": self.selection.preferred, "duration": duration]
+                if let data = try? JSONSerialization.data(withJSONObject: report, options: [.sortedKeys]),
+                   let text = String(data: data, encoding: .utf8) { print(text) }
+                NSApp.terminate(nil)
+            }
+        } else if !UserDefaults.standard.bool(forKey: "welcomeShown") {
             DispatchQueue.main.async { [weak self] in self?.welcome() }
         }
     }
     func reset() {
         generation += 1
+        fallbackWork?.cancel(); fallbackWork = nil
+        round = nil
+        selection.reset()
         tasks.values.forEach { $0.cancel() }
         tasks.removeAll()
         health.reset(connected: health.connected, now: ProcessInfo.processInfo.systemUptime)
@@ -130,35 +159,76 @@ final class App: NSObject, NSApplicationDelegate {
     }
     func tick() {
         update()
-        guard health.connected else { return }
+        guard health.connected, round == nil else { return }
         let now = ProcessInfo.processInfo.systemUptime
         guard now >= nextProbe else { return }
         nextProbe = now + 1.0
+        let list = targets
+        var next = ProbeRound(count: list.count, primary: selection.primary(now: now, count: list.count))
+        let initial = next.start()
+        round = next
         let currentGeneration = generation
-        for target in targets {
-            let id = UUID()
-            var request = URLRequest(url: URL(string: target.url)!)
-            request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
-            request.setValue("bytes=0-4095", forHTTPHeaderField: "Range")
-            let task = session.dataTask(with: request) { [weak self] data, response, error in
-                DispatchQueue.main.async {
-                    guard let self, self.generation == currentGeneration else { return }
-                    self.tasks.removeValue(forKey: id)
-                    let http = response as? HTTPURLResponse
-                    let body = String(data: data ?? Data(), encoding: .utf8) ?? ""
-                    let valid = error == nil && (200...299).contains(http?.statusCode ?? 0) && http?.url?.host == URL(string: target.url)?.host && (target.token.isEmpty || body.contains(target.token)) && (target.token.isEmpty && target.code == 200 || http?.statusCode == target.code)
-                    self.details[target.url] = valid ? self.l("通过", "Passed") : (error?.localizedDescription ?? self.l("响应未符合预期", "Unexpected response") + " / HTTP \(http?.statusCode ?? 0)")
-                    if valid { self.health.succeeded(now: ProcessInfo.processInfo.systemUptime) }
-                    self.update()
-                }
-            }
-            tasks[id] = task; task.resume()
+        let roundID = next.id
+        let work = DispatchWorkItem { [weak self] in
+            self?.startFallback(roundID: roundID, generation: currentGeneration, targets: list)
         }
+        fallbackWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6, execute: work)
+        initial.forEach { launch(index: $0, target: list[$0], roundID: roundID, generation: currentGeneration, targets: list) }
+    }
+    func startFallback(roundID: UUID, generation: Int, targets: [Target]) {
+        guard self.generation == generation, var current = round, current.id == roundID else { return }
+        let indices = current.fallback()
+        round = current
+        indices.forEach { launch(index: $0, target: targets[$0], roundID: roundID, generation: generation, targets: targets) }
+    }
+    func finishRound() {
+        fallbackWork?.cancel(); fallbackWork = nil
+        // Invalidate the round before cancelling, so late loser callbacks cannot change state.
+        round = nil
+        let losers = tasks.values
+        tasks.removeAll()
+        losers.forEach { $0.cancel() }
+    }
+    func launch(index: Int, target: Target, roundID: UUID, generation: Int, targets: [Target]) {
+        let id = UUID()
+        launchedRequestCount += 1
+        launchCounts[target.url, default: 0] += 1
+        selection.launched(index: index, now: ProcessInfo.processInfo.systemUptime)
+        var request = URLRequest(url: URL(string: target.url)!)
+        request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
+        request.setValue("bytes=0-4095", forHTTPHeaderField: "Range")
+        request.setValue("NetworkDot/1.1.1", forHTTPHeaderField: "User-Agent")
+        let task = session.dataTask(with: request) { [weak self] data, response, error in
+            DispatchQueue.main.async {
+                guard let self, self.generation == generation, var current = self.round, current.id == roundID else { return }
+                self.tasks.removeValue(forKey: id)
+                let http = response as? HTTPURLResponse
+                let body = String(data: data ?? Data(), encoding: .utf8) ?? ""
+                let valid = error == nil && (200...299).contains(http?.statusCode ?? 0) && http?.url?.host == URL(string: target.url)?.host && (target.token.isEmpty || body.contains(target.token)) && (target.token.isEmpty && target.code == 200 || http?.statusCode == target.code)
+                self.details[target.url] = valid ? self.l("通过", "Passed") : (error?.localizedDescription ?? self.l("响应未符合预期", "Unexpected response") + " / HTTP \(http?.statusCode ?? 0)")
+                let outcome = current.complete(index: index, success: valid)
+                self.round = current
+                switch outcome {
+                case .winner(let winner):
+                    self.health.succeeded(now: ProcessInfo.processInfo.systemUptime)
+                    self.selection.succeeded(index: winner)
+                    self.finishRound()
+                case .startFallback:
+                    self.startFallback(roundID: roundID, generation: generation, targets: targets)
+                case .allFailed:
+                    self.finishRound()
+                case .ignored, .waiting: break
+                }
+                self.update()
+            }
+        }
+        tasks[id] = task; task.resume()
     }
     @objc func showDetails() {
         let alert = NSAlert()
         alert.messageText = state
-        alert.informativeText = targets.map { "\($0.url)\n\(details[$0.url] ?? l("等待响应", "Waiting for response"))" }.joined(separator: "\n\n") + l("\n\n每秒检测；最近 2 秒任一目标通过即绿色。接口断开立即变红。红色不能区分断网与所有目标被屏蔽。", "\n\nProbes every second. Green if any target passed within 2 seconds. Interface disconnection turns red immediately. Red may also mean all probe targets are blocked.")
+        alert.informativeText = targets.map { "\($0.url)\n\(details[$0.url] ?? l("备用／尚未检测", "Standby / not checked yet"))" }.joined(separator: "\n\n") + l("\n\n优先检测第一个目标（默认 Apple），正常时每秒一个请求。失败或 0.6 秒未响应时启用备用；使用备用时每分钟重试首选目标。最近 2 秒任一目标通过即绿色。\n本次运行已发起请求：", "\n\nFirst target preferred (Apple by default); one request per second while healthy. Backups start on failure or after 0.6 seconds without a response. The first target is retried every minute while using a backup. Green if any target passed within 2 seconds.\nRequests started this session: ") + String(launchedRequestCount) + l("\n红色也可能表示所有目标被屏蔽。", "\nRed may also mean all targets are blocked.")
         NSApp.activate(ignoringOtherApps: true); alert.runModal()
     }
     @objc func settings() {
@@ -236,7 +306,7 @@ final class App: NSObject, NSApplicationDelegate {
     }
     @objc func about() {
         let alert = NSAlert()
-        alert.messageText = "Network Dot 1.1.0"
+        alert.messageText = "Network Dot 1.1.1"
         alert.informativeText = l("绿色：最近 2 秒任一检测成功。红色：未连接或检测失败。灰色：初次检测。\n\n不收集遥测，不读取浏览记录。检测请求直接访问所选网址。\nhttps://github.com/A-Very-Long-Name/Network-Dot", "Green: a probe passed in the last 2 seconds. Red: disconnected or probes failed. Gray: checking.\n\nNo telemetry or browsing history access. Probes contact the selected URLs directly.\nhttps://github.com/A-Very-Long-Name/Network-Dot")
         NSApp.activate(ignoringOtherApps: true); alert.runModal()
     }

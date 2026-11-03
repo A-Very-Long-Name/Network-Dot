@@ -9,7 +9,7 @@ for ARCH in arm64 x86_64; do
     xcrun swiftc -O -sdk "$SDK" -target "$ARCH-apple-macos13.0" \
         -module-cache-path "$BUILD/module-cache" \
         -framework AppKit -framework Network -framework ServiceManagement \
-        "$ROOT/Sources/ConnectivityState.swift" "$ROOT/Sources/main.swift" \
+        "$ROOT/Sources/ConnectivityState.swift" "$ROOT/Sources/ProbePolicy.swift" "$ROOT/Sources/main.swift" \
         -o "$BUILD/NetworkDot-$ARCH"
 done
 lipo -create "$BUILD/NetworkDot-arm64" "$BUILD/NetworkDot-x86_64" -output "$APP/Contents/MacOS/NetworkDot"
@@ -22,8 +22,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 <key>CFBundleDisplayName</key><string>Network Dot</string>
 <key>CFBundleExecutable</key><string>NetworkDot</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>1.1.0</string>
-<key>CFBundleVersion</key><string>2</string>
+<key>CFBundleShortVersionString</key><string>1.1.1</string>
+<key>CFBundleVersion</key><string>3</string>
 <key>CFBundleDevelopmentRegion</key><string>en</string>
 <key>CFBundleLocalizations</key><array><string>en</string><string>zh-Hans</string></array>
 <key>LSUIElement</key><true/>
