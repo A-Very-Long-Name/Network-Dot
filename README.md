@@ -6,6 +6,8 @@ A tiny native macOS internet indicator at the bottom-right of **every screen**. 
 
 **[Download the latest release](https://github.com/A-Very-Long-Name/Network-Dot/releases/latest)**
 
+NOTE: Code and descriptions created by ChatGPT/Codex. All ideas are otherwise original.
+
 ## Install
 
 **macOS 13 Ventura or later · Apple Silicon and Intel (Universal)**
