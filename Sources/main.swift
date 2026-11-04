@@ -1,6 +1,7 @@
 import AppKit
 import Network
 import ServiceManagement
+import QuartzCore
 
 struct Target {
     let url: String
@@ -8,26 +9,46 @@ struct Target {
     var code: Int = 200
 }
 let defaults = [Target(url: "https://www.apple.com/library/test/success.html", token: "<TITLE>Success</TITLE>"), Target(url: "https://www.gstatic.com/generate_204", token: "", code: 204), Target(url: "https://www.cloudflare.com/cdn-cgi/trace", token: "ip=")]
+final class IndicatorWindow: NSPanel {
+    override var canBecomeKey: Bool { false }
+    override var canBecomeMain: Bool { false }
+}
 final class Dot: NSView {
-    var color = NSColor.systemGray { didSet { needsDisplay = true } }
-    override func viewDidChangeBackingProperties() {
-        super.viewDidChangeBackingProperties()
-        needsDisplay = true
+    private let border = CAShapeLayer()
+    private let center = CAShapeLayer()
+    var color = NSColor.systemGray { didSet { updateDotLayers() } }
+    var rendersColor = true {
+        didSet { border.isHidden = !rendersColor; center.isHidden = !rendersColor }
     }
-    override func draw(_ dirtyRect: NSRect) {
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        layer?.addSublayer(border)
+        layer?.addSublayer(center)
+        updateDotLayers()
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    override func viewDidMoveToWindow() { super.viewDidMoveToWindow(); updateDotLayers() }
+    override func viewDidChangeBackingProperties() { super.viewDidChangeBackingProperties(); updateDotLayers() }
+    private func updateDotLayers() {
         let scale = max(window?.backingScaleFactor ?? 1, 1)
-        let borderWidth = 1 / scale
-        let center = bounds.insetBy(dx: 4, dy: 4)
-        let alignedCenter = backingAlignedRect(center, options: [.alignAllEdgesNearest])
-        NSColor.black.setFill()
-        NSBezierPath(ovalIn: alignedCenter.insetBy(dx: -borderWidth, dy: -borderWidth)).fill()
-        color.setFill()
-        NSBezierPath(ovalIn: alignedCenter).fill()
+        let inner = bounds.insetBy(dx: 4, dy: 4)
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        border.frame = bounds; center.frame = bounds
+        border.contentsScale = scale; center.contentsScale = scale
+        border.path = CGPath(ellipseIn: inner.insetBy(dx: -1 / scale, dy: -1 / scale), transform: nil)
+        border.fillColor = NSColor.black.cgColor
+        center.path = CGPath(ellipseIn: inner, transform: nil)
+        center.fillColor = color.cgColor
+        CATransaction.commit()
     }
 }
 final class App: NSObject, NSApplicationDelegate {
     let monitor = NWPathMonitor()
-    var panels: [NSPanel] = []
+    var panels: [NSWindow] = []
+    var restoreTicket = 0
+    var rawOverlays: [UnsafeMutableRawPointer?] = []
     var dots: [Dot] = []
     var timer: Timer?
     var health = ConnectivityHealth()
@@ -114,23 +135,33 @@ final class App: NSObject, NSApplicationDelegate {
     }
     @objc func wake() { reset(); tick(); restoreOverlay() }
     @objc func restoreOverlay() {
-        // Spaces transitions finish asynchronously. Reassert the overlay without activation.
-        for delay in [0.0, 0.25, 0.75] {
+        guard reportDuration == nil else { return }
+        restoreTicket += 1
+        let ticket = restoreTicket
+        for delay in [0.0, 0.1, 0.35, 0.8] {
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-                self?.panels.forEach { $0.orderFrontRegardless() }
+                guard let self, self.restoreTicket == ticket else { return }
+                // Raw visual surfaces remain intact across Space transitions.
+                self.panels.forEach { panel in
+                    panel.orderFrontRegardless()
+                    panel.displayIfNeeded()
+                }
             }
         }
     }
     @objc func screens() {
-        panels.forEach { $0.close() }; panels.removeAll(); dots.removeAll()
+        let oldPanels = panels
+        let oldRawOverlays = rawOverlays
+        panels = []; dots = []; rawOverlays = []
+        let top = NSScreen.screens.first?.frame.maxY ?? 0
         for screen in NSScreen.screens {
             let frame = screen.frame
-            let panel = NSPanel(contentRect: NSRect(x: frame.maxX - 22, y: frame.minY + 8, width: 16, height: 16), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+            let panel = IndicatorWindow(contentRect: NSRect(x: frame.maxX - 22, y: frame.minY + 8, width: 16, height: 16), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
             panel.isReleasedWhenClosed = false
+            panel.canHide = false
             panel.backgroundColor = .clear; panel.isOpaque = false; panel.hasShadow = false
-            panel.level = .screenSaver
             panel.animationBehavior = .none
-            panel.isFloatingPanel = true
+            panel.level = .screenSaver
             if #available(macOS 14.0, *) {
                 panel.collectionBehavior = [.canJoinAllSpaces, .canJoinAllApplications, .stationary, .fullScreenAuxiliary, .ignoresCycle]
             } else {
@@ -140,13 +171,32 @@ final class App: NSObject, NSApplicationDelegate {
             let dot = Dot(frame: NSRect(x: 0, y: 0, width: 16, height: 16))
             dot.menu = makeMenu()
             panel.contentView = dot; panel.orderFrontRegardless()
+            let raw = NDRawOverlayCreate(frame.maxX - 22, top - (frame.minY + 24), screen.backingScaleFactor)
+            rawOverlays.append(raw)
+            if ProcessInfo.processInfo.environment["NETWORK_DOT_BACKEND_REPORT"] == "1" {
+                print("raw-overlay screen=\(rawOverlays.count - 1) window=\(NDRawOverlayWindowID(raw))")
+                fflush(stdout)
+            }
+            dot.rendersColor = raw == nil
             panels.append(panel); dots.append(dot)
         }
+        lastPaintedColor = nil
         update()
+        panels.forEach { $0.displayIfNeeded() }
+        oldPanels.forEach { $0.close() }
+        oldRawOverlays.forEach { if let raw = $0 { NDRawOverlayDestroy(raw) } }
     }
+    var lastPaintedColor: NSColor?
     func paint(_ color: NSColor, _ label: String) {
         state = label
+        guard lastPaintedColor != color else { return }
+        lastPaintedColor = color
         dots.forEach { $0.color = color }
+        if let rgb = color.usingColorSpace(.sRGB) {
+            rawOverlays.forEach { raw in
+                if let raw { NDRawOverlayDraw(raw, rgb.redComponent, rgb.greenComponent, rgb.blueComponent) }
+            }
+        }
 
     }
     func update() {
@@ -306,9 +356,13 @@ final class App: NSObject, NSApplicationDelegate {
     }
     @objc func about() {
         let alert = NSAlert()
-        alert.messageText = "Network Dot 1.1.1"
+        alert.messageText = "Network Dot 1.1.2"
         alert.informativeText = l("绿色：最近 2 秒任一检测成功。红色：未连接或检测失败。灰色：初次检测。\n\n不收集遥测，不读取浏览记录。检测请求直接访问所选网址。\nhttps://github.com/A-Very-Long-Name/Network-Dot", "Green: a probe passed in the last 2 seconds. Red: disconnected or probes failed. Gray: checking.\n\nNo telemetry or browsing history access. Probes contact the selected URLs directly.\nhttps://github.com/A-Very-Long-Name/Network-Dot")
         NSApp.activate(ignoringOtherApps: true); alert.runModal()
+    }
+    func applicationWillTerminate(_ notification: Notification) {
+        rawOverlays.forEach { if let raw = $0 { NDRawOverlayDestroy(raw) } }
+        rawOverlays = []
     }
     @objc func quit() { NSApp.terminate(nil) }
 }

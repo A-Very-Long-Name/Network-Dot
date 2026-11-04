@@ -12,7 +12,7 @@ NOTE: Code and descriptions created by ChatGPT/Codex. All ideas are otherwise or
 
 **macOS 13 Ventura or later · Apple Silicon and Intel (Universal)**
 
-1. Download `Network-Dot-1.1.1-universal.dmg` from Releases.
+1. Download `Network-Dot-1.1.2-universal.dmg` from Releases.
 2. Open the disk image and drag **Network Dot** to **Applications**.
 3. Open the app from Applications. Choose whether to launch at login in the welcome dialog.
 4. Right-click the small dot at the bottom-right for settings, language, details, or Quit.
@@ -29,7 +29,7 @@ NOTE: Code and descriptions created by ChatGPT/Codex. All ideas are otherwise or
 
 One probe starts every second against the preferred target, **Apple by default**. If it fails or has not responded after 0.6 seconds, the other targets are tried in parallel. The first success cancels remaining probes and becomes the preferred target. While using a backup, Apple (or the first custom URL) is retried once per minute. Each request has a 1.5-second timeout; rounds do not overlap. Healthy requests are reduced from three per second to one (about 67% fewer). Slow or failing targets cause additional backup requests. The display checks freshness every 0.25 seconds. Interface disconnection and successful recovery update as soon as their callbacks arrive. **The 2-second threshold is measured from the last successful response, not the exact moment an outage starts.** In-flight responses and OS scheduling can affect observed delay. Short latency spikes may cause a brief red dot.
 
-The center is 8 points across with a one-physical-pixel black border, aligned for both standard and Retina displays. Non-activating overlay panels span Spaces and full-screen apps, and are reasserted after desktop/app transitions. Behavior during OS-controlled transition animations, screen lock, and protected system surfaces is not guaranteed. Only the small 16×16-point panel receives mouse events; everything else remains interactive.
+The center is 8 points across with a one-physical-pixel black border, aligned for both standard and Retina displays. Version 1.1.2 draws the dot on an independent WindowServer surface to keep it fixed during Spaces swipe animations, verified on the test Mac. A transparent non-activating panel handles the context menu. This backend dynamically loads private SkyLight APIs; if unavailable, the app falls back to an ordinary overlay, which can disappear during transitions. Future macOS compatibility, screen lock, and protected system surfaces are not guaranteed. Only the small 16×16-point panel receives mouse events; everything else remains interactive.
 
 ## Checks and school networks
 
